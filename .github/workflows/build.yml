@@ -33,15 +33,17 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # Known issue: Swift has compatibility problems with MSVC 14.44+
-    # See: https://github.com/swiftlang/swift/issues/76409
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      # Workaround for Swift cyclic module dependency with SDK 10.0.26100
+      # See: https://github.com/swiftlang/swift/issues/79745
+      - uses: GuillaumeFalourd/setup-windows10-sdk-action@v2.4
+        with:
+          sdk-version: 22621
       - uses: compnerd/gha-setup-swift@main
         with:
-          branch: development
-          tag: DEVELOPMENT-SNAPSHOT-2024-12-18-a
+          branch: swift-5.10.1-release
+          tag: 5.10.1-RELEASE
       - name: Build
         run: swift build -v
       - name: Run tests
