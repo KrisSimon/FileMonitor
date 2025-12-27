@@ -32,16 +32,15 @@ jobs:
         timeout-minutes: 10
 
   build-windows:
-    # Use windows-2022 which has SDK 10.0.22621 by default
+    # Use windows-2022 which has older SDK by default
     # windows-latest/windows-2025 has SDK 10.0.26100 which causes cyclic dependency
     # See: https://github.com/swiftlang/swift/issues/79745
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: compnerd/gha-setup-swift@main
+      - uses: SwiftyLab/setup-swift@latest
         with:
-          branch: swift-5.10.1-release
-          tag: 5.10.1-RELEASE
+          swift-version: "5.9"
       - name: Build
         run: swift build -v
       - name: Run tests
