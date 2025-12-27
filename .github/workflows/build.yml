@@ -42,7 +42,8 @@ jobs:
         with:
           swift-version: "5.9"
       - name: Build
-        run: swift build -v
+        # Build only the library target, skip examples which have @main compatibility issues on Windows
+        run: swift build --target FileMonitor -v
       - name: Run tests
         run: swift test -v
         timeout-minutes: 10
