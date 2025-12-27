@@ -10,14 +10,11 @@ jobs:
 
   build:
 
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    container: swift:5.10
 
     steps:
     - uses: actions/checkout@v4
-    - name: Install Swift
-      uses: swift-actions/setup-swift@v2
-      with:
-        swift-version: 5.10
     - name: Build
       run: swift build -v
     - name: Run tests
