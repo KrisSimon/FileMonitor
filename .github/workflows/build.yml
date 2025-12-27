@@ -1,0 +1,43 @@
+name: macos
+
+on:
+  push:
+    branches: [ main, release/*, feature/* ]
+  pull_request:
+    branches: [ main, release/* ]
+
+jobs:
+  build-mac:
+    runs-on: macos-13
+    steps:
+    - uses: actions/checkout@v6
+    - name: Build
+      run: swift build
+    - name: Run tests
+      run: swift test
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Swift
+        uses: swift-actions/setup-swift@v3
+        with:
+          swift-version: 5.9
+      - name: Build
+        run: swift build -v
+      - name: Run tests
+        run: swift test -v
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Swift
+        uses: SwiftyLab/setup-swift@latest
+        with:
+          swift-version: "5.9"
+      - name: Build
+        run: swift build -v
+      - name: Run tests
+        run: swift test -v
