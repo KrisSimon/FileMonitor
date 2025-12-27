@@ -11,7 +11,7 @@ import FileMonitorShared
 #if os(Windows)
 import WinSDK
 
-public struct WindowsWatcher: WatcherProtocol {
+public class WindowsWatcher: WatcherProtocol {
     public var delegate: WatcherDelegate?
 
     private let directory: URL
@@ -19,14 +19,14 @@ public struct WindowsWatcher: WatcherProtocol {
     private var isRunning = false
     private var monitorTask: Task<Void, Never>?
 
-    public init(directory: URL) throws {
+    public required init(directory: URL) throws {
         guard directory.isDirectory else {
             throw FileMonitorErrors.not_a_directory(url: directory)
         }
         self.directory = directory
     }
 
-    public mutating func observe() throws {
+    public func observe() throws {
         // Open directory handle for monitoring
         let path = directory.path
         let handle = path.withCString(encodedAs: UTF16.self) { pathPtr in
@@ -122,7 +122,7 @@ public struct WindowsWatcher: WatcherProtocol {
         }
     }
 
-    public mutating func stop() {
+    public func stop() {
         isRunning = false
         monitorTask?.cancel()
         monitorTask = nil
