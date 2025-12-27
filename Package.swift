@@ -30,6 +30,7 @@ let package = Package(
                 "FileMonitorShared",
                 .target(name: "FileMonitorMacOS", condition: .when(platforms: [.macOS])),
                 .target(name: "FileMonitorLinux", condition: .when(platforms: [.linux])),
+                .target(name: "FileMonitorWindows", condition: .when(platforms: [.windows])),
             ]
         ),
         .target(
@@ -51,6 +52,11 @@ let package = Package(
                 name: "FileMonitorMacOS",
                 dependencies: ["FileMonitorShared"],
                 path: "Sources/FileMonitorMacOS"
+        ),
+        .target(
+                name: "FileMonitorWindows",
+                dependencies: ["FileMonitorShared"],
+                path: "Sources/FileMonitorWindows"
         ),
         .executableTarget(
                 name: "FileMonitorDelegateExample",

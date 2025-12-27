@@ -1,11 +1,11 @@
 # FileMonitor
 
-Watch for file changes in a directory with a unified API on Linux and macOS.
+Watch for file changes in a directory with a unified API on Linux, macOS, and Windows.
 
 ## Overview
-Detecting file changes is an OS-specific task, and the implementation differs on each major platform. While Linux uses 
-sys/inotify, macOS lacks this functionality and provide `FSEventStream`. Even though there are many examples available 
-for specific platforms, the interfaces still differ.
+Detecting file changes is an OS-specific task, and the implementation differs on each major platform. Linux uses
+sys/inotify, macOS provides `FSEventStream`, and Windows uses `ReadDirectoryChangesW`. Even though there are many
+examples available for specific platforms, the interfaces still differ.
 
 To address this, we have created the FileMonitor package. We have included code from various sources, which were not 
 actively maintained, to provide a reliable and consistent interface for detecting file changes in a directory across 
@@ -93,11 +93,11 @@ struct FileMonitorExample: FileDidChangeDelegate {
 You can find a command-line application example in Sources/FileMonitorExample.
 
 ## Compatibility
-FileMonitor is compatible with Swift 5.7+ on macOS and Linux platforms.
+FileMonitor is compatible with Swift 5.9+ on macOS, Linux, and Windows platforms.
 
-[x] MacOS
-[x] Linux
-[] Windows
+- [x] macOS (FSEventStream)
+- [x] Linux (inotify)
+- [x] Windows (ReadDirectoryChangesW)
 
 ## Contributing
 Thank you for considering contributing to the FileMonitor Swift package! Contributions are welcome and greatly 
