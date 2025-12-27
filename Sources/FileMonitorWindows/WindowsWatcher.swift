@@ -63,7 +63,7 @@ public class WindowsWatcher: WatcherProtocol {
                         watchHandle,
                         bufferPtr.baseAddress,
                         DWORD(bufferPtr.count),
-                        0,  // Don't watch subtree (FALSE = 0)
+                        false,  // Don't watch subtree
                         DWORD(FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE),
                         &bytesReturned,
                         nil,
