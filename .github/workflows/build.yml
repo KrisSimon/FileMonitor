@@ -33,22 +33,28 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # Workaround for Swift cyclic module dependency with SDK 10.0.26100
-    # See: https://github.com/swiftlang/swift/issues/79745
-    env:
-      UCRTVersion: 10.0.22621.0
-      WindowsSDKVersion: 10.0.22621.0
     steps:
       - uses: actions/checkout@v4
+      # Workaround for Swift cyclic module dependency with SDK 10.0.26100
+      # See: https://github.com/swiftlang/swift/issues/79745
       - uses: GuillaumeFalourd/setup-windows10-sdk-action@v2.4
         with:
           sdk-version: 22621
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          sdk: 10.0.22621.0
       - uses: compnerd/gha-setup-swift@main
         with:
           branch: swift-5.10.1-release
           tag: 5.10.1-RELEASE
       - name: Build
-        run: swift build -v
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 -winsdk=10.0.22621.0
+          swift build -v
       - name: Run tests
-        run: swift test -v
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 -winsdk=10.0.22621.0
+          swift test -v
         timeout-minutes: 10
