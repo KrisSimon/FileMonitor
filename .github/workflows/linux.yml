@@ -10,12 +10,17 @@ jobs:
 
   build:
 
-    runs-on: ubuntu-latest
-    container: swift:5.10
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install Swift
+      run: |
+        wget -q https://download.swift.org/swift-5.10.1-release/ubuntu2404/swift-5.10.1-RELEASE/swift-5.10.1-RELEASE-ubuntu24.04.tar.gz
+        tar xzf swift-5.10.1-RELEASE-ubuntu24.04.tar.gz
+        echo "$PWD/swift-5.10.1-RELEASE-ubuntu24.04/usr/bin" >> $GITHUB_PATH
     - name: Build
       run: swift build -v
     - name: Run tests
       run: swift test -v
+      timeout-minutes: 10
