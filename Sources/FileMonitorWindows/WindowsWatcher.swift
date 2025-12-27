@@ -71,7 +71,7 @@ public class WindowsWatcher: WatcherProtocol {
                     )
                 }
 
-                guard success != 0, bytesReturned > 0 else {
+                guard success, bytesReturned > 0 else {
                     continue
                 }
 
