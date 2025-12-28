@@ -33,10 +33,8 @@ jobs:
       - name: Build
         run: swift build -v
       - name: Run tests
-        # Skip tests waiting for inotify events (unreliable in CI)
-        # Runs only testInitModule
-        run: swift test -v --filter testInitModule
-        timeout-minutes: 5
+        run: swift test -v
+        timeout-minutes: 10
 
   build-windows:
     runs-on: windows-latest
@@ -48,7 +46,5 @@ jobs:
       - name: Build
         run: swift build -v
       - name: Run tests
-        # Skip tests using file watcher (ReadDirectoryChangesW blocks in CI environment)
-        # Only run initialization tests that don't start the watcher
-        run: swift test -v --filter testInitModule --filter testWindowsWatcherInitialization
-        timeout-minutes: 5
+        run: swift test -v
+        timeout-minutes: 10
