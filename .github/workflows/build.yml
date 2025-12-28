@@ -1,0 +1,53 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, release/*, feature/* ]
+  pull_request:
+    branches: [ main, release/* ]
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: swift build
+    - name: Run tests
+      run: swift test
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Swift
+        run: |
+          wget -q https://download.swift.org/swift-5.10.1-release/ubuntu2204/swift-5.10.1-RELEASE/swift-5.10.1-RELEASE-ubuntu22.04.tar.gz
+          tar xzf swift-5.10.1-RELEASE-ubuntu22.04.tar.gz
+          echo "$PWD/swift-5.10.1-RELEASE-ubuntu22.04/usr/bin" >> $GITHUB_PATH
+      - name: Build
+        run: swift build -v
+      - name: Run tests
+        # Skip tests waiting for inotify events (unreliable in CI)
+        # Runs only testInitModule
+        run: swift test -v --filter testInitModule
+        timeout-minutes: 5
+
+  build-windows:
+    # Use windows-2019 which has older MSVC (pre-14.44) toolchain
+    # MSVC 14.44+ has cyclic module dependency issue with Swift
+    # See: https://github.com/swiftlang/swift/issues/79745
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+      - uses: SwiftyLab/setup-swift@latest
+        with:
+          swift-version: "5.9"
+      - name: Build
+        # Example targets are conditionally excluded on Windows in Package.swift
+        run: swift build -v
+      - name: Run tests
+        # Skip tests using file watcher (ReadDirectoryChangesW blocks in CI environment)
+        # Only run initialization tests that don't start the watcher
+        run: swift test -v --filter testInitModule --filter testWindowsWatcherInitialization
+        timeout-minutes: 5

@@ -3,24 +3,29 @@
 
 import PackageDescription
 
+// Example executables use @main with async which doesn't work on Windows Swift 5.9
+#if os(Windows)
+let exampleProducts: [Product] = []
+let exampleTargets: [Target] = []
+#else
+let exampleProducts: [Product] = [
+    .executable(name: "FileMonitorDelegateExample", targets: ["FileMonitorDelegateExample"]),
+    .executable(name: "FileMonitorAsyncStreamExample", targets: ["FileMonitorAsyncStreamExample"])
+]
+let exampleTargets: [Target] = [
+    .executableTarget(name: "FileMonitorDelegateExample", dependencies: ["FileMonitor"]),
+    .executableTarget(name: "FileMonitorAsyncStreamExample", dependencies: ["FileMonitor"])
+]
+#endif
+
 let package = Package(
     name: "FileMonitor",
     platforms: [
       .macOS(.v13)
     ],
     products: [
-        // Products define the executables and libraries a package produces, and make them visible to other packages.
-        .library(
-                name: "FileMonitor",
-                targets: ["FileMonitor"]),
-        .executable(
-                name: "FileMonitorDelegateExample",
-                targets: ["FileMonitorDelegateExample"]
-        ),
-        .executable(name: "FileMonitorAsyncStreamExample",
-                    targets: ["FileMonitorAsyncStreamExample"]
-        )
-    ],
+        .library(name: "FileMonitor", targets: ["FileMonitor"]),
+    ] + exampleProducts,
     dependencies: [
     ],
     targets: [
@@ -30,6 +35,7 @@ let package = Package(
                 "FileMonitorShared",
                 .target(name: "FileMonitorMacOS", condition: .when(platforms: [.macOS])),
                 .target(name: "FileMonitorLinux", condition: .when(platforms: [.linux])),
+                .target(name: "FileMonitorWindows", condition: .when(platforms: [.windows])),
             ]
         ),
         .target(
@@ -52,14 +58,13 @@ let package = Package(
                 dependencies: ["FileMonitorShared"],
                 path: "Sources/FileMonitorMacOS"
         ),
-        .executableTarget(
-                name: "FileMonitorDelegateExample",
-                dependencies: ["FileMonitor"]),
-        .executableTarget(
-                name: "FileMonitorAsyncStreamExample",
-                dependencies: ["FileMonitor"]),
+        .target(
+                name: "FileMonitorWindows",
+                dependencies: ["FileMonitorShared"],
+                path: "Sources/FileMonitorWindows"
+        ),
         .testTarget(
             name: "FileMonitorTests",
             dependencies: ["FileMonitor"]),
-    ]
+    ] + exampleTargets
 )
