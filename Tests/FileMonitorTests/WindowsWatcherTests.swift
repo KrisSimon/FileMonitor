@@ -43,11 +43,11 @@ import FileMonitorShared
         let directory = tmp.appendingPathComponent(dir)
         let testFile = directory.appendingPathComponent("\(String.random(length: 8)).txt")
 
-        class TestDelegate: WatcherDelegate {
+        final class TestDelegate: WatcherDelegate, @unchecked Sendable {
             let expectedFile: URL
-            let onAdd: () -> Void
+            let onAdd: @Sendable () -> Void
 
-            init(expectedFile: URL, onAdd: @escaping () -> Void) {
+            init(expectedFile: URL, onAdd: @escaping @Sendable () -> Void) {
                 self.expectedFile = expectedFile
                 self.onAdd = onAdd
             }
