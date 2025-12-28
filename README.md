@@ -93,7 +93,7 @@ struct FileMonitorExample: FileDidChangeDelegate {
 You can find a command-line application example in Sources/FileMonitorExample.
 
 ## Compatibility
-FileMonitor is compatible with Swift 6.1+ on macOS, Linux, and Windows platforms.
+FileMonitor is compatible with Swift 6.2+ on macOS, Linux, and Windows platforms.
 
 - [x] macOS (FSEventStream)
 - [x] Linux (inotify)
