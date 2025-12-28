@@ -5,11 +5,11 @@
 
 import Foundation
 
-public protocol WatcherDelegate {
+public protocol WatcherDelegate: Sendable {
     func fileDidChanged(event: FileChangeEvent)
 }
 
-public protocol WatcherProtocol {
+public protocol WatcherProtocol: Sendable {
     var delegate: WatcherDelegate? { set get }
 
     init(directory: URL) throws

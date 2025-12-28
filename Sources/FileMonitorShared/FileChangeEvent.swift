@@ -5,7 +5,7 @@
 
 import Foundation
 
-public enum FileChangeEvent {
+public enum FileChangeEvent: Sendable {
     case added(file: URL)
     case deleted(file: URL)
     case changed(file: URL)

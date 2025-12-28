@@ -1,13 +1,8 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
-// Example executables use @main with async which doesn't work on Windows Swift 5.9
-#if os(Windows)
-let exampleProducts: [Product] = []
-let exampleTargets: [Target] = []
-#else
 let exampleProducts: [Product] = [
     .executable(name: "FileMonitorDelegateExample", targets: ["FileMonitorDelegateExample"]),
     .executable(name: "FileMonitorAsyncStreamExample", targets: ["FileMonitorAsyncStreamExample"])
@@ -16,12 +11,11 @@ let exampleTargets: [Target] = [
     .executableTarget(name: "FileMonitorDelegateExample", dependencies: ["FileMonitor"]),
     .executableTarget(name: "FileMonitorAsyncStreamExample", dependencies: ["FileMonitor"])
 ]
-#endif
 
 let package = Package(
     name: "FileMonitor",
     platforms: [
-      .macOS(.v13)
+      .macOS(.v14)
     ],
     products: [
         .library(name: "FileMonitor", targets: ["FileMonitor"]),

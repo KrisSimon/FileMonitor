@@ -1,37 +1,31 @@
-import XCTest
+import Testing
+import Foundation
 
 @testable import FileMonitor
 import FileMonitorShared
 
-final class FileMonitorTests: XCTestCase {
+@Suite struct FileMonitorTests {
 
     let tmp = FileManager.default.temporaryDirectory
-    let dir = String.random(length: 10)
+    let dir: String
 
-    override func setUpWithError() throws {
-        super.setUp()
+    init() throws {
+        dir = String.random(length: 10)
         let directory = tmp.appendingPathComponent(dir)
-
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        print("Created directory: \(tmp.appendingPathComponent(dir).path)")
     }
 
-    override func tearDownWithError() throws {
-        try super.tearDownWithError()
-        let directory = tmp.appendingPathComponent(dir)
-        try FileManager.default.removeItem(at: directory)
-    }
-
-    func testInitModule() throws {
-        XCTAssertNoThrow(try FileMonitor(directory: FileManager.default.temporaryDirectory))
+    @Test func initModule() throws {
+        defer { cleanup() }
+        _ = try FileMonitor(directory: FileManager.default.temporaryDirectory)
     }
 
     struct Watcher: FileDidChangeDelegate {
-        static var fileChanges = 0
-        let callback: ()->Void
+        nonisolated(unsafe) static var fileChanges = 0
+        let callback: @Sendable () -> Void
         let file: URL
 
-        init(on file: URL, completion: @escaping ()->Void) {
+        init(on file: URL, completion: @escaping @Sendable () -> Void) {
             self.file = file
             callback = completion
         }
@@ -47,85 +41,95 @@ final class FileMonitorTests: XCTestCase {
         }
     }
 
-    func testLifecycleCreate() throws {
-        let expectation = expectation(description: "Wait for file creation")
-        expectation.assertForOverFulfill = false
+    @Test func lifecycleCreate() async throws {
+        defer { cleanup() }
 
-        let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))");
-        let watcher = Watcher(on: testFile) { expectation.fulfill() }
+        await confirmation("Wait for file creation") { confirmed in
+            let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))")
+            let watcher = Watcher(on: testFile) { confirmed() }
 
-        let monitor = try FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
-        try monitor.start()
-        Watcher.fileChanges = 0
+            let monitor = try! FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
+            try! monitor.start()
+            Watcher.fileChanges = 0
 
-        FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
-        wait(for: [expectation], timeout: 10)
+            FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
 
-        XCTAssertGreaterThan(Watcher.fileChanges, 0)
+            try? await Task.sleep(for: .seconds(5))
+        }
+
+        #expect(Watcher.fileChanges > 0)
     }
 
-    func testLifecycleChange() async throws {
-        let expectation = expectation(description: "Wait for file creation")
-        expectation.assertForOverFulfill = false
+    @Test func lifecycleChange() async throws {
+        defer { cleanup() }
 
-        let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))");
-        FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
+        await confirmation("Wait for file change", expectedCount: 1...) { confirmed in
+            let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))")
+            FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
 
-        let watcher = Watcher(on: testFile) { expectation.fulfill() }
+            let watcher = Watcher(on: testFile) { confirmed() }
 
-        let monitor = try FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
-        try monitor.start()
-        Watcher.fileChanges = 0
-        
-        try "Next New Content".write(toFile: testFile.path, atomically: true, encoding: .utf8)
-        await fulfillment(of: [expectation], timeout: 10)
-        monitor.stop()
-        XCTAssertGreaterThan(Watcher.fileChanges, 0)
+            let monitor = try! FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
+            try! monitor.start()
+            Watcher.fileChanges = 0
+
+            try! "Next New Content".write(toFile: testFile.path, atomically: true, encoding: .utf8)
+
+            try? await Task.sleep(for: .seconds(5))
+            monitor.stop()
+        }
+
+        #expect(Watcher.fileChanges > 0)
     }
 
-    func testLifecycleChangeAsync() async throws {
-        let asyncExpectation = XCTestExpectation(description: "Async wait for file creation")
+    @Test func lifecycleChangeAsync() async throws {
+        defer { cleanup() }
 
-        let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))");
+        let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))")
         FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
 
         let monitor = try FileMonitor(directory: tmp.appendingPathComponent(dir))
         try monitor.start()
-        Watcher.fileChanges = 0
 
         var events = [FileChange]()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-             try? "New Content".write(toFile: testFile.path, atomically: true, encoding: .utf8)
+
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            try? "New Content".write(toFile: testFile.path, atomically: true, encoding: .utf8)
         }
 
         for await event in monitor.stream {
             events.append(event)
-            asyncExpectation.fulfill()
             monitor.stop()
+            break
         }
-        
-        await fulfillment(of: [asyncExpectation], timeout: 10)
-        XCTAssertGreaterThan(events.count, 0)
+
+        #expect(events.count > 0)
     }
 
-    func testLifecycleDelete() throws {
-        let expectation = expectation(description: "Wait for file deletion")
-        expectation.assertForOverFulfill = false
+    @Test func lifecycleDelete() async throws {
+        defer { cleanup() }
 
-        let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))");
-        FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
+        await confirmation("Wait for file deletion") { confirmed in
+            let testFile = tmp.appendingPathComponent(dir).appendingPathComponent("\(String.random(length: 8)).\(String.random(length: 3))")
+            FileManager.default.createFile(atPath: testFile.path, contents: "hello".data(using: .utf8))
 
-        let watcher = Watcher(on: testFile) { expectation.fulfill() }
+            let watcher = Watcher(on: testFile) { confirmed() }
 
-        let monitor = try FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
-        try monitor.start()
-        Watcher.fileChanges = 0
+            let monitor = try! FileMonitor(directory: tmp.appendingPathComponent(dir), delegate: watcher)
+            try! monitor.start()
+            Watcher.fileChanges = 0
 
-        try FileManager.default.removeItem(at: testFile)
-        wait(for: [expectation], timeout: 10)
+            try! FileManager.default.removeItem(at: testFile)
 
-        XCTAssertGreaterThan(Watcher.fileChanges, 0)
+            try? await Task.sleep(for: .seconds(5))
+        }
+
+        #expect(Watcher.fileChanges > 0)
     }
 
-
+    private func cleanup() {
+        let directory = tmp.appendingPathComponent(dir)
+        try? FileManager.default.removeItem(at: directory)
+    }
 }

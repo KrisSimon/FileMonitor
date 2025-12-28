@@ -8,7 +8,7 @@ import CInotify
 #endif
 
 #if os(Linux)
-public class FileSystemWatcher {
+public final class FileSystemWatcher: @unchecked Sendable {
     // inotify_init() initializes a new inotify instance and returns a
     // file descriptor associated with a new inotify event queue.
     private let fileDescriptor: Int32
@@ -47,7 +47,7 @@ public class FileSystemWatcher {
     }
 
     @discardableResult
-    public func watch(path: String, for mask: InotifyEventMask, thenInvoke callback: @escaping (InotifyEvent) -> Void) -> Int32 {
+    public func watch(path: String, for mask: InotifyEventMask, thenInvoke callback: @escaping @Sendable (InotifyEvent) -> Void) -> Int32 {
         watchDescriptor = inotify_add_watch(fileDescriptor, path, mask.rawValue)
 
         dispatchQueue.async { [self] in

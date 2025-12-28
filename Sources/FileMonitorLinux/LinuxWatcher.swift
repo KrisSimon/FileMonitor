@@ -10,7 +10,7 @@ import CInotify
 #endif
 
 #if os(Linux)
-public struct LinuxWatcher: WatcherProtocol {
+public struct LinuxWatcher: WatcherProtocol, @unchecked Sendable {
     var fsWatcher: FileSystemWatcher
     public var delegate: WatcherDelegate?
     var path: URL
