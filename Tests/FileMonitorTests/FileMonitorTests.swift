@@ -22,10 +22,10 @@ import FileMonitorShared
 
     struct Watcher: FileDidChangeDelegate {
         nonisolated(unsafe) static var fileChanges = 0
-        let callback: () -> Void
+        let callback: @Sendable () -> Void
         let file: URL
 
-        init(on file: URL, completion: @escaping () -> Void) {
+        init(on file: URL, completion: @escaping @Sendable () -> Void) {
             self.file = file
             callback = completion
         }

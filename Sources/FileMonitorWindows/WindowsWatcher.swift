@@ -11,7 +11,7 @@ import FileMonitorShared
 #if os(Windows)
 import WinSDK
 
-public class WindowsWatcher: WatcherProtocol {
+public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
     public var delegate: WatcherDelegate?
 
     private let directory: URL

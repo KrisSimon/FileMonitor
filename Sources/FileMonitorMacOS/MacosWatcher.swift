@@ -7,7 +7,7 @@ import Foundation
 import FileMonitorShared
 
 #if os(macOS)
-public final class MacosWatcher: WatcherProtocol {
+public final class MacosWatcher: WatcherProtocol, @unchecked Sendable {
     public var delegate: WatcherDelegate?
     let fileWatcher: FileWatcher
     private var lastFiles: [URL] = []

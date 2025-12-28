@@ -9,7 +9,7 @@ import Foundation
 import Dispatch
 
 /// A single Inotify event
-public struct InotifyEvent {
+public struct InotifyEvent: Sendable {
   // Watch descriptor
   public let watchDescriptor: Int
 
