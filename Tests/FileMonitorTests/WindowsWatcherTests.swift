@@ -1,4 +1,5 @@
-import XCTest
+import Testing
+import Foundation
 
 @testable import FileMonitor
 import FileMonitorShared
@@ -6,30 +7,26 @@ import FileMonitorShared
 #if os(Windows)
 @testable import FileMonitorWindows
 
-final class WindowsWatcherTests: XCTestCase {
+@Suite struct WindowsWatcherTests {
 
     let tmp = FileManager.default.temporaryDirectory
-    let dir = String.random(length: 10)
+    let dir: String
 
-    override func setUpWithError() throws {
-        super.setUp()
+    init() throws {
+        dir = String.random(length: 10)
         let directory = tmp.appendingPathComponent(dir)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
-        try super.tearDownWithError()
-        let directory = tmp.appendingPathComponent(dir)
-        try FileManager.default.removeItem(at: directory)
-    }
-
-    func testWindowsWatcherInitialization() throws {
+    @Test func windowsWatcherInitialization() throws {
+        defer { cleanup() }
         let directory = tmp.appendingPathComponent(dir)
         let watcher = try WindowsWatcher(directory: directory)
-        XCTAssertNotNil(watcher)
+        #expect(watcher != nil)
     }
 
-    func testWindowsWatcherStartStop() throws {
+    @Test func windowsWatcherStartStop() throws {
+        defer { cleanup() }
         let directory = tmp.appendingPathComponent(dir)
         var watcher = try WindowsWatcher(directory: directory)
         try watcher.observe()
@@ -40,9 +37,8 @@ final class WindowsWatcherTests: XCTestCase {
         watcher.stop()
     }
 
-    func testWindowsWatcherDetectsFileCreation() throws {
-        let expectation = expectation(description: "Wait for file creation")
-        expectation.assertForOverFulfill = false
+    @Test func windowsWatcherDetectsFileCreation() async throws {
+        defer { cleanup() }
 
         let directory = tmp.appendingPathComponent(dir)
         let testFile = directory.appendingPathComponent("\(String.random(length: 8)).txt")
@@ -68,20 +64,28 @@ final class WindowsWatcherTests: XCTestCase {
             }
         }
 
-        var watcher = try WindowsWatcher(directory: directory)
-        watcher.delegate = TestDelegate(expectedFile: testFile) {
-            expectation.fulfill()
+        await confirmation("Wait for file creation") { confirmed in
+            var watcher = try! WindowsWatcher(directory: directory)
+            watcher.delegate = TestDelegate(expectedFile: testFile) {
+                confirmed()
+            }
+
+            try! watcher.observe()
+
+            // Create file after starting watcher
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                try? "test content".write(to: testFile, atomically: false, encoding: .utf8)
+            }
+
+            try? await Task.sleep(for: .seconds(5))
+            watcher.stop()
         }
+    }
 
-        try watcher.observe()
-
-        // Create file after starting watcher
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            try? "test content".write(to: testFile, atomically: false, encoding: .utf8)
-        }
-
-        wait(for: [expectation], timeout: 10)
-        watcher.stop()
+    private func cleanup() {
+        let directory = tmp.appendingPathComponent(dir)
+        try? FileManager.default.removeItem(at: directory)
     }
 }
 
