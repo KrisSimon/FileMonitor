@@ -58,18 +58,21 @@ import FileMonitorShared
 
         let monitor = try FileMonitor(directory: directory, delegate: watcher)
         try monitor.start()
+        // Linux's inotify needs a moment for the watch descriptor to be
+        // registered and the reader thread to enter its read() loop.
+        try await Task.sleep(for: .seconds(2))
 
         // Create
         try "hello".write(to: testFile, atomically: false, encoding: .utf8)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(3))
 
         // Modify
         try "hello world".write(to: testFile, atomically: false, encoding: .utf8)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(3))
 
         // Delete
         try FileManager.default.removeItem(at: testFile)
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(for: .seconds(3))
 
         monitor.stop()
 
@@ -109,20 +112,31 @@ import FileMonitorShared
 
         let monitor = try FileMonitor(directory: directory, delegate: watcher)
         try monitor.start()
+        // Let Linux inotify finish registering before the first write.
+        try await Task.sleep(for: .seconds(2))
 
         try "1".write(to: testFile, atomically: false, encoding: .utf8)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(2))
         try "2".write(to: testFile, atomically: false, encoding: .utf8)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(2))
         try "3".write(to: testFile, atomically: false, encoding: .utf8)
-        try await Task.sleep(for: .seconds(1))
+        try await Task.sleep(for: .seconds(3))
 
         monitor.stop()
 
-        let addedCount = watcher.events.reduce(into: 0) { count, event in
-            if case .added = event { count += 1 }
+        let kinds = watcher.events.map { event -> String in
+            switch event {
+            case .added:   return "added"
+            case .changed: return "changed"
+            case .deleted: return "deleted"
+            }
         }
-        #expect(addedCount == 1, "expected exactly one .added, got \(addedCount) in \(watcher.events)")
+        let addedCount = kinds.filter { $0 == "added" }.count
+        // Test premise: at minimum we must see one .added (otherwise the
+        // platform watcher didn't deliver our create event and the rest of
+        // the assertion is meaningless). The bug guard is: no MORE than one.
+        #expect(addedCount >= 1, "no events for \(testFile.lastPathComponent); platform did not deliver, got \(kinds)")
+        #expect(addedCount <= 1, "cumulative-flag bug regressed — multiple .added in \(kinds)")
     }
 
     private func cleanup() {
