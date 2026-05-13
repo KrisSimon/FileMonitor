@@ -59,47 +59,62 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
-      # Diagnostic bisect. Earlier run (commit ffa9e4f) proved:
-      #   - swift test --list-tests works on Windows
-      #   - swift test --filter "initModule" produces clean xunit output
-      #   - Full suite hangs to timeout
-      # So one (or a few) specific tests hang. Top suspects: tests that wait
-      # on AsyncStream events from FileMonitor — if WindowsWatcher doesn't
-      # deliver any events through the stream, `for await` blocks forever
-      # and even @Suite(.timeLimit) can't interrupt it (the suspended
-      # continuation never gets a chance to be cancelled).
-      #
-      # Exclude the async-stream test and the Windows-specific watcher
-      # tests; everything else should complete. If it does, we've localised
-      # the hang. If not, repeat with a narrower filter.
+      # Per-test bisect. Earlier runs proved swift-testing on Windows
+      # works for `initModule()`; the full suite (and even a suite minus
+      # the two top suspects) still hangs. So a hang exists in at least
+      # one of the remaining lifecycle tests. Run each test in isolation
+      # with a 90-second timeout so we get a definitive name → "which
+      # step timed out" tells us the offender.
       - name: List tests (discovery check)
         shell: pwsh
         run: swift test --list-tests
         timeout-minutes: 3
-      - name: Run suite minus likely hangers
+
+      - name: Test - initModule
         shell: pwsh
-        # `--skip` filters by test ID prefix. Drop:
-        #   lifecycleChangeAsync — uses `for await monitor.stream`
-        #   WindowsWatcherTests/* — direct WindowsWatcher.observe() probes
-        run: |
-          swift test --parallel `
-            --skip "lifecycleChangeAsync" `
-            --skip "WindowsWatcherTests" `
-            --xunit-output bisect-tests.xml
-        timeout-minutes: 8
-      - name: Show xunit outputs
-        if: always()
+        run: swift test --filter "FileMonitorTests/initModule" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleAdd (ExplicitAdd)
         shell: pwsh
-        run: |
-          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "=== $($_.Name) ==="
-            Get-Content $_.FullName
-          }
-      - name: Upload xunit outputs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-tests-xml
-          path: |
-            *tests*.xml
-          if-no-files-found: ignore
+        run: swift test --filter "FileMonitorExplicitAddTests/lifecycleAdd" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleChange (ExplicitChange)
+        shell: pwsh
+        run: swift test --filter "FileMonitorExplicitChangeTests/lifecycleChange" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleDelete (ExplicitDelete)
+        shell: pwsh
+        run: swift test --filter "FileMonitorExplicitDeleteTests/lifecycleDelete" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleAdd (FileHasPath)
+        shell: pwsh
+        run: swift test --filter "FileMonitorFileHasPathTests/lifecycleAdd" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleCreate (FileMonitorTests)
+        shell: pwsh
+        run: swift test --filter "FileMonitorTests/lifecycleCreate" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleChange (FileMonitorTests)
+        shell: pwsh
+        run: swift test --filter "FileMonitorTests/lifecycleChange" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleDelete (FileMonitorTests)
+        shell: pwsh
+        run: swift test --filter "FileMonitorTests/lifecycleDelete" --parallel
+        timeout-minutes: 2
+      - name: Test - lifecycleChangeAsync (FileMonitorTests)
+        shell: pwsh
+        run: swift test --filter "FileMonitorTests/lifecycleChangeAsync" --parallel
+        timeout-minutes: 2
+      - name: Test - WindowsWatcher initialization
+        shell: pwsh
+        run: swift test --filter "WindowsWatcherTests/windowsWatcherInitialization" --parallel
+        timeout-minutes: 2
+      - name: Test - WindowsWatcher startStop
+        shell: pwsh
+        run: swift test --filter "WindowsWatcherTests/windowsWatcherStartStop" --parallel
+        timeout-minutes: 2
+      - name: Test - WindowsWatcher detectsFileCreation
+        shell: pwsh
+        run: swift test --filter "WindowsWatcherTests/windowsWatcherDetectsFileCreation" --parallel
+        timeout-minutes: 2
