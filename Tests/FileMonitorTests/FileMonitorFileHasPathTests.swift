@@ -4,7 +4,7 @@ import Foundation
 @testable import FileMonitor
 import FileMonitorShared
 
-@Suite struct FileMonitorFileHasPathTests {
+@Suite(.serialized) struct FileMonitorFileHasPathTests {
 
     let tmp = FileManager.default.temporaryDirectory
     let dir: String
@@ -62,7 +62,12 @@ import FileMonitorShared
         #expect(Watcher.fileChanges == 1)
         #expect(Watcher.lastFile != nil)
         #expect(Watcher.lastFile?.hasDirectoryPath != nil)
-        #expect(Watcher.lastFile!.path.contains(dir))
+        // Use optional-chained .contains so a missed event (Linux CI under
+        // parallel load can occasionally drop one) records a clean #expect
+        // failure instead of trapping on a force-unwrapped nil — which on
+        // Linux crashes the entire test process with `Illegal instruction`
+        // and takes every other concurrently-running test with it.
+        #expect(Watcher.lastFile?.path.contains(dir) == true)
     }
 
     private func cleanup() {
