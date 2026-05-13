@@ -54,27 +54,39 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
-      - name: Run tests (serial)
-        shell: pwsh
-        # No --parallel. --xunit-output writes results to file in case
-        # SPM's stdout-to-pipe flushing still bites on Windows (SPM
-        # #6592). Up the timeout to 5 min — gives 4× headroom vs the
-        # ~70 s observed in the per-test bisect.
-        run: swift test --xunit-output windows-tests.xml
-        timeout-minutes: 5
-      - name: Show xunit output
-        if: always()
+
+      # Workaround for resource-leak hang on Windows. Per-test bisect proved
+      # each test passes in 2–7 s when run in its own `swift test` process,
+      # but multiple tests in one process hang forever. The leak is in
+      # WindowsWatcher: tests don't call `monitor.stop()`, and the
+      # `Task.detached` event loop doesn't tear down cleanly when the
+      # owning struct drops, so directory handles + ReadDirectoryChangesW
+      # operations stack across tests and eventually deadlock the
+      # swift-testing scheduler.
+      #
+      # Run each discovered test as its own swift test invocation so each
+      # gets a fresh process. Total runtime ~90 s for 12 tests (build is
+      # cached after the first invocation).
+      - name: Run tests one process per test
         shell: pwsh
         run: |
-          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "=== $($_.Name) ==="
-            Get-Content $_.FullName
+          $output = swift test --list-tests
+          $tests = $output | Where-Object { $_ -match '^FileMonitorTests\.' }
+          if (-not $tests) {
+            Write-Error "No tests discovered"
+            exit 1
           }
-      - name: Upload xunit output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-tests-xml
-          path: |
-            *tests*.xml
-          if-no-files-found: ignore
+          $failed = @()
+          foreach ($t in $tests) {
+            $name = $t.Trim()
+            Write-Host "::group::$name"
+            swift test --filter ([regex]::Escape($name))
+            if ($LASTEXITCODE -ne 0) { $failed += $name }
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "::error::failed tests: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "All $($tests.Count) tests passed."
+        timeout-minutes: 10
