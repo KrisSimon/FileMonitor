@@ -38,20 +38,18 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # Windows test runs have been hanging since Swift 6.2.x: the test binary
-    # links cleanly, "Build complete!" is the last line, then 10 minutes of
-    # silence followed by the job timeout — swift-testing never produces any
-    # output, so the hang is below the level `.timeLimit` traits can catch.
-    # Last green Windows job was on Swift 6.2.0 (2025-12-28 / commit 5adbe8f).
-    # Marked continue-on-error so PRs aren't gated by this pre-existing issue.
-    # Tracking: needs Windows-side debugging (likely test-binary startup or
-    # swift-testing discovery on Windows).
+    # Pinned to Swift 6.2.0 because 6.2.4 (the current `swift-version: "6.2"`
+    # resolution as of 2026-05) hangs the test binary at startup — "Build
+    # complete!" is the last line, then 10 minutes of silence. The previous
+    # green Windows job (2025-12-28, commit 5adbe8f) was on 6.2.0 with no
+    # other workflow changes. Reproducer reported upstream pending; pin
+    # narrows the regression to a Swift toolchain change.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: SwiftyLab/setup-swift@latest
         with:
-          swift-version: "6.2"
+          swift-version: "6.2.0"
       - name: Build
         run: swift build -v
       - name: Run tests
