@@ -4,7 +4,7 @@ import Foundation
 @testable import FileMonitor
 import FileMonitorShared
 
-@Suite(.serialized) struct FileMonitorFileHasPathTests {
+@Suite(.serialized, .timeLimit(.minutes(1))) struct FileMonitorFileHasPathTests {
 
     let tmp = FileManager.default.temporaryDirectory
     let dir: String

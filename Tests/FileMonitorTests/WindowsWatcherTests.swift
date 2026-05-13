@@ -7,7 +7,7 @@ import FileMonitorShared
 #if os(Windows)
 @testable import FileMonitorWindows
 
-@Suite struct WindowsWatcherTests {
+@Suite(.serialized, .timeLimit(.minutes(1))) struct WindowsWatcherTests {
 
     let tmp = FileManager.default.temporaryDirectory
     let dir: String

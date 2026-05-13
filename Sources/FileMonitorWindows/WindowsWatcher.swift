@@ -27,7 +27,7 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
     }
 
     public func observe() throws {
-        // Open directory handle for monitoring with overlapped flag
+        // Open directory handle for monitoring with overlapped flag.
         let path = directory.path
         let handle = path.withCString(encodedAs: UTF16.self) { pathPtr in
             CreateFileW(
@@ -48,16 +48,16 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
         directoryHandle = handle
         isRunning = true
 
-        // Start monitoring in background task
         let watchHandle = handle
         let watchDirectory = directory
         let watchDelegate = delegate
 
         monitorTask = Task.detached { [watchHandle, watchDirectory, watchDelegate] in
             var buffer = [UInt8](repeating: 0, count: 65536)
-            var bytesReturned: DWORD = 0
 
-            // Create event for overlapped I/O
+            // Event for overlapped I/O. We keep it manual-reset so that we
+            // never miss a signal if we observe the loop top while the kernel
+            // is signalling completion.
             let event = CreateEventW(nil, true, false, nil)
             guard event != nil else { return }
             defer { CloseHandle(event) }
@@ -66,96 +66,129 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             overlapped.hEvent = event
 
             while !Task.isCancelled {
-                // Reset event
                 ResetEvent(event)
 
-                // Start async read
+                // Kick off one read. With FILE_FLAG_OVERLAPPED + a manual-reset
+                // event, ReadDirectoryChangesW typically returns FALSE with
+                // GetLastError() == ERROR_IO_PENDING and signals `event` when
+                // data is available. It may *also* succeed synchronously when
+                // changes are already buffered — in that case `event` is set
+                // immediately and bytesReturned reflects the data.
+                var bytesReturned: DWORD = 0
                 let readStarted = buffer.withUnsafeMutableBytes { bufferPtr in
                     ReadDirectoryChangesW(
                         watchHandle,
                         bufferPtr.baseAddress,
                         DWORD(bufferPtr.count),
-                        false,  // Don't watch subtree
-                        DWORD(FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE),
+                        false,  // don't watch subtree
+                        DWORD(FILE_NOTIFY_CHANGE_FILE_NAME |
+                              FILE_NOTIFY_CHANGE_LAST_WRITE |
+                              FILE_NOTIFY_CHANGE_SIZE),
                         &bytesReturned,
                         &overlapped,
                         nil
                     )
                 }
-
-                guard readStarted else {
-                    // Check if it's a pending operation (expected for overlapped I/O)
-                    let error = GetLastError()
-                    if error != DWORD(ERROR_IO_PENDING) {
+                if !readStarted {
+                    let lastError = GetLastError()
+                    if lastError != DWORD(ERROR_IO_PENDING) {
+                        // Real failure — abort.
                         break
                     }
-                    continue
+                    // ERROR_IO_PENDING: the read is queued, the event will be
+                    // signalled when data arrives. Fall through to the wait
+                    // loop below. The previous implementation `continue`d
+                    // here, immediately re-issuing ReadDirectoryChangesW on
+                    // the same overlapped struct while the previous request
+                    // was still pending — undefined behaviour that could
+                    // leave events stranded in the kernel and the loop
+                    // spinning without ever processing them.
                 }
 
-                // Wait with timeout (1 second) so we can check for cancellation
-                let waitResult = WaitForSingleObject(event, 1000)
-
-                if waitResult == WAIT_OBJECT_0 {
-                    // Get the result
-                    var transferred: DWORD = 0
-                    if GetOverlappedResult(watchHandle, &overlapped, &transferred, false), transferred > 0 {
-                        bytesReturned = transferred
-
-                        // Parse FILE_NOTIFY_INFORMATION structures
-                        buffer.withUnsafeBytes { ptr in
-                            var offset = 0
-                            while offset < Int(bytesReturned) {
-                                guard let baseAddress = ptr.baseAddress else { break }
-
-                                let infoPtr = baseAddress.advanced(by: offset)
-                                let nextEntryOffset = infoPtr.load(as: DWORD.self)
-                                let action = infoPtr.advanced(by: 4).load(as: DWORD.self)
-                                let fileNameLength = infoPtr.advanced(by: 8).load(as: DWORD.self)
-
-                                // File name starts at offset 12 (after NextEntryOffset, Action, FileNameLength)
-                                let fileNamePtr = infoPtr.advanced(by: 12).assumingMemoryBound(to: WCHAR.self)
-                                let charCount = Int(fileNameLength) / MemoryLayout<WCHAR>.size
-
-                                // Convert UTF-16 to String
-                                let fileName = String(utf16CodeUnits: fileNamePtr, count: charCount)
-                                let fileURL = watchDirectory.appendingPathComponent(fileName)
-
-                                // Map Windows action to FileChangeEvent
-                                let event: FileChangeEvent?
-                                switch action {
-                                case DWORD(FILE_ACTION_ADDED), DWORD(FILE_ACTION_RENAMED_NEW_NAME):
-                                    event = .added(file: fileURL)
-                                case DWORD(FILE_ACTION_REMOVED), DWORD(FILE_ACTION_RENAMED_OLD_NAME):
-                                    event = .deleted(file: fileURL)
-                                case DWORD(FILE_ACTION_MODIFIED):
-                                    event = .changed(file: fileURL)
-                                default:
-                                    event = nil
-                                }
-
-                                if let event = event {
-                                    watchDelegate?.fileDidChanged(event: event)
-                                }
-
-                                // Move to next entry or break if this is the last one
-                                if nextEntryOffset == 0 {
-                                    break
-                                }
-                                offset += Int(nextEntryOffset)
-                            }
-                        }
+                // Poll the event with a short timeout so the loop can also
+                // notice Task cancellation. Manual-reset means the wait is
+                // edge-safe across iterations even if WaitForSingleObject is
+                // called after the kernel has already signalled.
+                var completed = false
+                while !Task.isCancelled {
+                    let waitResult = WaitForSingleObject(event, 250)
+                    if waitResult == WAIT_OBJECT_0 {
+                        completed = true
+                        break
+                    } else if waitResult == DWORD(WAIT_TIMEOUT) {
+                        continue
+                    } else {
+                        // WAIT_ABANDONED / WAIT_FAILED — abort the outer loop.
+                        break
                     }
-                } else if waitResult == DWORD(WAIT_TIMEOUT) {
-                    // Timeout - cancel pending I/O and loop to check Task.isCancelled
+                }
+
+                if Task.isCancelled {
+                    // Cancel the queued operation and drain it so we don't
+                    // leave the kernel waiting to write into our buffer.
                     CancelIo(watchHandle)
-                    continue
-                } else {
-                    // Error
+                    var transferred: DWORD = 0
+                    _ = GetOverlappedResult(watchHandle, &overlapped, &transferred, true)
                     break
+                }
+
+                guard completed else { break }
+
+                // The operation either completed synchronously (readStarted
+                // was true) or asynchronously (ERROR_IO_PENDING). Either way,
+                // GetOverlappedResult gives us the byte count.
+                var transferred: DWORD = 0
+                guard GetOverlappedResult(watchHandle, &overlapped, &transferred, false),
+                      transferred > 0 else {
+                    continue  // empty notification, re-arm
+                }
+
+                buffer.withUnsafeBytes { ptr in
+                    var offset = 0
+                    while offset < Int(transferred) {
+                        guard let baseAddress = ptr.baseAddress else { break }
+
+                        let infoPtr = baseAddress.advanced(by: offset)
+                        let nextEntryOffset = infoPtr.load(as: DWORD.self)
+                        let action = infoPtr.advanced(by: 4).load(as: DWORD.self)
+                        let fileNameLength = infoPtr.advanced(by: 8).load(as: DWORD.self)
+
+                        // File name starts at offset 12 (after NextEntryOffset,
+                        // Action, FileNameLength).
+                        let fileNamePtr = infoPtr.advanced(by: 12).assumingMemoryBound(to: WCHAR.self)
+                        let charCount = Int(fileNameLength) / MemoryLayout<WCHAR>.size
+                        let fileName = String(utf16CodeUnits: fileNamePtr, count: charCount)
+                        let fileURL = watchDirectory.appendingPathComponent(fileName)
+
+                        // Renames generate a paired _OLD_NAME / _NEW_NAME
+                        // sequence; the previous code mapped _OLD_NAME to
+                        // .deleted and _NEW_NAME to .added, which matches the
+                        // POSIX shape consumers expect, so keep that.
+                        let event: FileChangeEvent?
+                        switch action {
+                        case DWORD(FILE_ACTION_ADDED), DWORD(FILE_ACTION_RENAMED_NEW_NAME):
+                            event = .added(file: fileURL)
+                        case DWORD(FILE_ACTION_REMOVED), DWORD(FILE_ACTION_RENAMED_OLD_NAME):
+                            event = .deleted(file: fileURL)
+                        case DWORD(FILE_ACTION_MODIFIED):
+                            event = .changed(file: fileURL)
+                        default:
+                            event = nil
+                        }
+
+                        if let event = event {
+                            watchDelegate?.fileDidChanged(event: event)
+                        }
+
+                        if nextEntryOffset == 0 {
+                            break
+                        }
+                        offset += Int(nextEntryOffset)
+                    }
                 }
             }
 
-            // Cancel any pending I/O before exiting
+            // Cancel any pending I/O on the way out.
             CancelIo(watchHandle)
         }
     }

@@ -4,7 +4,7 @@ import Foundation
 @testable import FileMonitor
 import FileMonitorShared
 
-@Suite(.serialized) struct FileMonitorExplicitChangeTests {
+@Suite(.serialized, .timeLimit(.minutes(1))) struct FileMonitorExplicitChangeTests {
 
     let tmp = FileManager.default.temporaryDirectory
     let dir: String
