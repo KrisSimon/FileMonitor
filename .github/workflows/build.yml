@@ -59,21 +59,45 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
-      - name: Run tests
+      # Diagnostic steps: split the "swift test hangs on Windows" symptom
+      # into discoverable parts. If `--list-tests` completes, the testing
+      # framework is alive on Windows. If a single trivial test (initModule —
+      # no file watcher, no async, no concurrency) passes, the harness can
+      # execute. Anything else hanging then narrows the scope to the actual
+      # FS-event tests.
+      - name: List tests (discovery check)
+        shell: pwsh
+        run: swift test --list-tests
+        timeout-minutes: 3
+      - name: Run trivial test only (harness check)
+        shell: pwsh
+        run: swift test --filter "initModule" --parallel --xunit-output trivial-tests.xml
+        timeout-minutes: 5
+      - name: Show xunit outputs
+        if: always()
         shell: pwsh
         run: |
-          swift test -v --parallel --xunit-output windows-tests.xml
-          if (Test-Path windows-tests.xml) {
-            Write-Host "=== windows-tests.xml ==="
-            Get-Content windows-tests.xml
-          } else {
-            Write-Host "::warning::no xunit output produced"
+          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "=== $($_.Name) ==="
+            Get-Content $_.FullName
           }
-        timeout-minutes: 15
-      - name: Upload xunit output
+      - name: Run full suite
+        shell: pwsh
+        run: swift test -v --parallel --xunit-output windows-tests.xml
+        timeout-minutes: 8
+      - name: Show full xunit outputs
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "=== $($_.Name) ==="
+            Get-Content $_.FullName
+          }
+      - name: Upload xunit outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-tests-xml
-          path: windows-tests.xml
+          path: |
+            *tests*.xml
           if-no-files-found: ignore
