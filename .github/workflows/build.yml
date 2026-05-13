@@ -59,33 +59,35 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
-      # Diagnostic steps: split the "swift test hangs on Windows" symptom
-      # into discoverable parts. If `--list-tests` completes, the testing
-      # framework is alive on Windows. If a single trivial test (initModule —
-      # no file watcher, no async, no concurrency) passes, the harness can
-      # execute. Anything else hanging then narrows the scope to the actual
-      # FS-event tests.
+      # Diagnostic bisect. Earlier run (commit ffa9e4f) proved:
+      #   - swift test --list-tests works on Windows
+      #   - swift test --filter "initModule" produces clean xunit output
+      #   - Full suite hangs to timeout
+      # So one (or a few) specific tests hang. Top suspects: tests that wait
+      # on AsyncStream events from FileMonitor — if WindowsWatcher doesn't
+      # deliver any events through the stream, `for await` blocks forever
+      # and even @Suite(.timeLimit) can't interrupt it (the suspended
+      # continuation never gets a chance to be cancelled).
+      #
+      # Exclude the async-stream test and the Windows-specific watcher
+      # tests; everything else should complete. If it does, we've localised
+      # the hang. If not, repeat with a narrower filter.
       - name: List tests (discovery check)
         shell: pwsh
         run: swift test --list-tests
         timeout-minutes: 3
-      - name: Run trivial test only (harness check)
+      - name: Run suite minus likely hangers
         shell: pwsh
-        run: swift test --filter "initModule" --parallel --xunit-output trivial-tests.xml
-        timeout-minutes: 5
-      - name: Show xunit outputs
-        if: always()
-        shell: pwsh
+        # `--skip` filters by test ID prefix. Drop:
+        #   lifecycleChangeAsync — uses `for await monitor.stream`
+        #   WindowsWatcherTests/* — direct WindowsWatcher.observe() probes
         run: |
-          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "=== $($_.Name) ==="
-            Get-Content $_.FullName
-          }
-      - name: Run full suite
-        shell: pwsh
-        run: swift test -v --parallel --xunit-output windows-tests.xml
+          swift test --parallel `
+            --skip "lifecycleChangeAsync" `
+            --skip "WindowsWatcherTests" `
+            --xunit-output bisect-tests.xml
         timeout-minutes: 8
-      - name: Show full xunit outputs
+      - name: Show xunit outputs
         if: always()
         shell: pwsh
         run: |
