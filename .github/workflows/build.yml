@@ -38,20 +38,15 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # The "Windows hangs for 10 minutes producing nothing" symptom is
-    # actually SPM issue #6592: `swift test` doesn't flush its stdout
-    # when running into a pipe, which is what happens under any CI
-    # runner. The test binary is running fine — its output is sitting
-    # in a fully-buffered pipe until the binary exits, which never
-    # happens before the job timeout.
+    # Per-test bisect (db6d3e2) proved every individual test passes on
+    # Windows in 2–7 seconds. The full suite hangs only when run with
+    # `swift test --parallel`. Conclusion: the hang is in the parallel
+    # scheduler, not in any specific test. Cross-suite concurrent file
+    # watchers race on Windows file-system resources.
     #
-    # Workaround: `--xunit-output` writes test results directly to a
-    # file as they happen, bypassing the stdout pipe. The
-    # `--parallel` flag is required for the report to be emitted; an
-    # SPM quirk noted in the docs for the flag. Per-test serialisation
-    # comes from `.serialized` traits on each suite, not from this CLI
-    # flag, so `--parallel` is safe here.
-    continue-on-error: true   # safety net while we shake out the new flow
+    # Fix: drop `--parallel`. Each @Suite already carries `.serialized`
+    # so within-suite ordering is preserved; without --parallel, suites
+    # themselves also run sequentially. Total runtime ~70 s.
     steps:
       - uses: actions/checkout@v6
       - uses: SwiftyLab/setup-swift@latest
@@ -59,74 +54,27 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
-      # Per-test bisect. Earlier runs proved swift-testing on Windows
-      # works for `initModule()`; the full suite (and even a suite minus
-      # the two top suspects) still hangs. So a hang exists in at least
-      # one of the remaining lifecycle tests. Run each test in isolation
-      # with a 90-second timeout so we get a definitive name → "which
-      # step timed out" tells us the offender.
-      - name: List tests (discovery check)
+      - name: Run tests (serial)
         shell: pwsh
-        run: swift test --list-tests
-        timeout-minutes: 3
-
-      - name: Test - initModule
-        continue-on-error: true
+        # No --parallel. --xunit-output writes results to file in case
+        # SPM's stdout-to-pipe flushing still bites on Windows (SPM
+        # #6592). Up the timeout to 5 min — gives 4× headroom vs the
+        # ~70 s observed in the per-test bisect.
+        run: swift test --xunit-output windows-tests.xml
+        timeout-minutes: 5
+      - name: Show xunit output
+        if: always()
         shell: pwsh
-        run: swift test --filter "FileMonitorTests/initModule" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleAdd (ExplicitAdd)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorExplicitAddTests/lifecycleAdd" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleChange (ExplicitChange)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorExplicitChangeTests/lifecycleChange" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleDelete (ExplicitDelete)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorExplicitDeleteTests/lifecycleDelete" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleAdd (FileHasPath)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorFileHasPathTests/lifecycleAdd" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleCreate (FileMonitorTests)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorTests/lifecycleCreate" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleChange (FileMonitorTests)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorTests/lifecycleChange" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleDelete (FileMonitorTests)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorTests/lifecycleDelete" --parallel
-        timeout-minutes: 2
-      - name: Test - lifecycleChangeAsync (FileMonitorTests)
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "FileMonitorTests/lifecycleChangeAsync" --parallel
-        timeout-minutes: 2
-      - name: Test - WindowsWatcher initialization
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "WindowsWatcherTests/windowsWatcherInitialization" --parallel
-        timeout-minutes: 2
-      - name: Test - WindowsWatcher startStop
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "WindowsWatcherTests/windowsWatcherStartStop" --parallel
-        timeout-minutes: 2
-      - name: Test - WindowsWatcher detectsFileCreation
-        continue-on-error: true
-        shell: pwsh
-        run: swift test --filter "WindowsWatcherTests/windowsWatcherDetectsFileCreation" --parallel
-        timeout-minutes: 2
+        run: |
+          Get-ChildItem -Filter "*tests*.xml" -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "=== $($_.Name) ==="
+            Get-Content $_.FullName
+          }
+      - name: Upload xunit output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tests-xml
+          path: |
+            *tests*.xml
+          if-no-files-found: ignore
