@@ -10,7 +10,10 @@ import FileMonitorShared
 /// (notably compiled binaries) the snapshot lagged the FS state and every
 /// event collapsed to `.changed`. The classifier now trusts kernel flags
 /// directly and uses per-path memory for the cumulative `ItemCreated` bit.
-@Suite struct FileMonitorLifecycleSequenceTests {
+///
+/// Scoped to macOS because the fix is in `MacosWatcher`; the Linux watcher
+/// is a separate inotify-based code path and isn't audited here.
+@Suite(.enabled(if: isMacOS)) struct FileMonitorLifecycleSequenceTests {
 
     let tmp = FileManager.default.temporaryDirectory
     let dir: String
@@ -144,3 +147,14 @@ import FileMonitorShared
         try? FileManager.default.removeItem(at: directory)
     }
 }
+
+/// Compile-time platform gate for the suite. swift-testing's `.enabled(if:)`
+/// trait wants a `Bool` value; we route through this constant so the suite
+/// is skipped (not just runtime-no-op'd) on non-macOS platforms.
+private let isMacOS: Bool = {
+    #if os(macOS)
+    return true
+    #else
+    return false
+    #endif
+}()
