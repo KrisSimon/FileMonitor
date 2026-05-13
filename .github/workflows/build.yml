@@ -38,26 +38,20 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-    # Windows test run is currently disabled. `swift build` succeeds and the
-    # full test suite still compiles, so this job catches compile regressions
-    # — but `swift test` hangs the test binary at startup on Swift 6.2 on
-    # Windows. Diagnosis:
-    #   - Last green Windows job (run #20554666635, 2025-12-28) was at commit
-    #     381dea5, the merge of feature/windows-support — when tests still
-    #     used XCTest.
-    #   - The very next merge (PR #2, ending at 20e90f3) migrated tests to
-    #     swift-testing (commit 388a883: "migrate tests to Swift Testing").
-    #     Every Windows test run since hangs identically: `Build complete!`
-    #     is the last line, then the test binary runs silently for the full
-    #     10 minutes (`Terminate orphan process: pid (8120)` confirms it is
-    #     alive but emitting nothing) until the job times out.
-    #   - Re-pinning the toolchain back to Swift 6.2.0 (the version in use
-    #     at the last green run) does not change the symptom, so it is not
-    #     a 6.2.x toolchain regression — it is the swift-testing runner on
-    #     Windows itself, not the project code.
-    # Restore the test step once upstream swift-testing produces output on
-    # Windows again.
-    continue-on-error: true
+    # The "Windows hangs for 10 minutes producing nothing" symptom is
+    # actually SPM issue #6592: `swift test` doesn't flush its stdout
+    # when running into a pipe, which is what happens under any CI
+    # runner. The test binary is running fine — its output is sitting
+    # in a fully-buffered pipe until the binary exits, which never
+    # happens before the job timeout.
+    #
+    # Workaround: `--xunit-output` writes test results directly to a
+    # file as they happen, bypassing the stdout pipe. The
+    # `--parallel` flag is required for the report to be emitted; an
+    # SPM quirk noted in the docs for the flag. Per-test serialisation
+    # comes from `.serialized` traits on each suite, not from this CLI
+    # flag, so `--parallel` is safe here.
+    continue-on-error: true   # safety net while we shake out the new flow
     steps:
       - uses: actions/checkout@v6
       - uses: SwiftyLab/setup-swift@latest
@@ -65,3 +59,21 @@ jobs:
           swift-version: "6.2"
       - name: Build (includes test compilation)
         run: swift build --build-tests -v
+      - name: Run tests
+        shell: pwsh
+        run: |
+          swift test -v --parallel --xunit-output windows-tests.xml
+          if (Test-Path windows-tests.xml) {
+            Write-Host "=== windows-tests.xml ==="
+            Get-Content windows-tests.xml
+          } else {
+            Write-Host "::warning::no xunit output produced"
+          }
+        timeout-minutes: 15
+      - name: Upload xunit output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tests-xml
+          path: windows-tests.xml
+          if-no-files-found: ignore
