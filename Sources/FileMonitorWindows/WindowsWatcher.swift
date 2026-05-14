@@ -34,7 +34,7 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
     public func observe() throws {
         // Open directory handle for overlapped monitoring.
         let path = directory.path
-        let handle = path.withCString(encodedAs: UTF16.self) { pathPtr in
+        let rawHandle = path.withCString(encodedAs: UTF16.self) { pathPtr in
             CreateFileW(
                 pathPtr,
                 DWORD(FILE_LIST_DIRECTORY),
@@ -46,7 +46,12 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             )
         }
 
-        guard handle != INVALID_HANDLE_VALUE else {
+        // CreateFileW returns `HANDLE?`; success returns a valid handle,
+        // failure returns INVALID_HANDLE_VALUE (a sentinel, *not* nil).
+        // Unwrap-and-reject both cases in one guard so the rest of the
+        // function works with a non-optional HANDLE — the HandleBox /
+        // closure-capture path below requires non-optional.
+        guard let handle = rawHandle, handle != INVALID_HANDLE_VALUE else {
             throw FileMonitorErrors.can_not_open(url: directory)
         }
 
