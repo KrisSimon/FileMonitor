@@ -53,10 +53,6 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
         directoryHandle = handle
         shouldStopWatching = false
 
-        let watchHandle = handle
-        let watchDirectory = directory
-        let watchDelegate = delegate
-
         // Block observe() until the worker has actually queued
         // ReadDirectoryChangesW with the kernel. Without this, observe()
         // returns the moment the dispatch is scheduled — the kernel may
@@ -76,13 +72,28 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
         }
         let priming = Priming()
 
+        // The Windows HANDLE typealias is `UnsafeMutableRawPointer?`,
+        // which is *not* Sendable in Swift 6. Wrap it in a Sendable
+        // box so we can capture it into the @Sendable dispatch closure
+        // without unsafe casting tricks. The box holds the raw handle
+        // value; it's our responsibility (the watcher's lifecycle) to
+        // ensure the handle stays valid until the worker exits.
+        final class HandleBox: @unchecked Sendable {
+            let handle: HANDLE
+            init(_ h: HANDLE) { handle = h }
+        }
+        let handleBox = HandleBox(handle)
+        let watchDirectory = directory
+        let watchDelegate = delegate
+
         // Use DispatchQueue.global rather than Task.detached: dispatch
         // closures are @Sendable @convention(block), not `sending`, so
         // observe() can keep using `priming` after the call without
         // tripping Swift 6's transfer-of-ownership checker. (And there's
         // no need for structured concurrency here — the worker is a
         // single read loop with explicit stop signalling.)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self, watchHandle, watchDirectory, watchDelegate, priming] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, handleBox, watchDirectory, watchDelegate, priming] in
+            let watchHandle = handleBox.handle
             // Manual-reset event so the wait is edge-safe across iterations
             // even if the kernel signals between Wait calls.
             guard let event = CreateEventW(nil, true, false, nil) else {
