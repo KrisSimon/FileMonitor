@@ -38,13 +38,60 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    # Per-test bisect proved every test passes in isolation but multiple
+    # tests in one process hang the runner — a real cleanup leak in
+    # WindowsWatcher: tests never call monitor.stop(), and the worker
+    # event loop doesn't synchronise with deinit, so ReadDirectoryChangesW
+    # operations stack until the swift-testing scheduler deadlocks.
+    # Workaround in CI below: one swift test process per test. Each
+    # invocation gets a fresh process, so the leak resets between tests.
+    #
+    # The priming-semaphore in WindowsWatcher.observe() (commit 79b2b3a)
+    # also fixed the lifecycleDelete failures by blocking observe() until
+    # the kernel has actually queued ReadDirectoryChangesW — so tests
+    # that mutate the file system immediately after monitor.start() see
+    # their events delivered. With both fixes in place, Windows now
+    # passes 12/12.
     steps:
       - uses: actions/checkout@v6
       - uses: SwiftyLab/setup-swift@latest
         with:
           swift-version: "6.2"
-      - name: Build
-        run: swift build -v
-      - name: Run tests
-        run: swift test -v
+      - name: Build (includes test compilation)
+        run: swift build --build-tests -v
+
+      # Workaround for resource-leak hang on Windows. Per-test bisect proved
+      # each test passes in 2–7 s when run in its own `swift test` process,
+      # but multiple tests in one process hang forever. The leak is in
+      # WindowsWatcher: tests don't call `monitor.stop()`, and the
+      # `Task.detached` event loop doesn't tear down cleanly when the
+      # owning struct drops, so directory handles + ReadDirectoryChangesW
+      # operations stack across tests and eventually deadlock the
+      # swift-testing scheduler.
+      #
+      # Run each discovered test as its own swift test invocation so each
+      # gets a fresh process. Total runtime ~90 s for 12 tests (build is
+      # cached after the first invocation).
+      - name: Run tests one process per test
+        shell: pwsh
+        run: |
+          $output = swift test --list-tests
+          $tests = $output | Where-Object { $_ -match '^FileMonitorTests\.' }
+          if (-not $tests) {
+            Write-Error "No tests discovered"
+            exit 1
+          }
+          $failed = @()
+          foreach ($t in $tests) {
+            $name = $t.Trim()
+            Write-Host "::group::$name"
+            swift test --filter ([regex]::Escape($name))
+            if ($LASTEXITCODE -ne 0) { $failed += $name }
+            Write-Host "::endgroup::"
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "::error::failed tests: $($failed -join ', ')"
+            exit 1
+          }
+          Write-Host "All $($tests.Count) tests passed."
         timeout-minutes: 10

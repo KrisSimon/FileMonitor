@@ -16,8 +16,13 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
 
     private let directory: URL
     private var directoryHandle: HANDLE?
-    private var isRunning = false
-    private var monitorTask: Task<Void, Never>?
+    private let stateLock = NSLock()
+    private var _shouldStopWatching: Bool = false
+
+    private var shouldStopWatching: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _shouldStopWatching }
+        set { stateLock.lock(); _shouldStopWatching = newValue; stateLock.unlock() }
+    }
 
     public required init(directory: URL) throws {
         guard directory.isDirectory else {
@@ -27,9 +32,9 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
     }
 
     public func observe() throws {
-        // Open directory handle for monitoring with overlapped flag
+        // Open directory handle for overlapped monitoring.
         let path = directory.path
-        let handle = path.withCString(encodedAs: UTF16.self) { pathPtr in
+        let rawHandle = path.withCString(encodedAs: UTF16.self) { pathPtr in
             CreateFileW(
                 pathPtr,
                 DWORD(FILE_LIST_DIRECTORY),
@@ -41,129 +46,216 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             )
         }
 
-        guard handle != INVALID_HANDLE_VALUE else {
+        // CreateFileW returns `HANDLE?`; success returns a valid handle,
+        // failure returns INVALID_HANDLE_VALUE (a sentinel, *not* nil).
+        // Unwrap-and-reject both cases in one guard so the rest of the
+        // function works with a non-optional HANDLE — the HandleBox /
+        // closure-capture path below requires non-optional.
+        guard let handle = rawHandle, handle != INVALID_HANDLE_VALUE else {
             throw FileMonitorErrors.can_not_open(url: directory)
         }
 
         directoryHandle = handle
-        isRunning = true
+        shouldStopWatching = false
 
-        // Start monitoring in background task
-        let watchHandle = handle
+        // Block observe() until the worker has actually queued
+        // ReadDirectoryChangesW with the kernel. Without this, observe()
+        // returns the moment the dispatch is scheduled — the kernel may
+        // not yet be watching when the caller performs the operations
+        // they want to be notified about. Linux's inotify_add_watch and
+        // macOS's FSEventStreamStart both block until the watch is live;
+        // this gives Windows the same contract.
+        //
+        // The priming state is wrapped in a single Sendable class so the
+        // closure captures a reference (uniformly safe across the
+        // Swift-6 strict-concurrency sending constraint) instead of two
+        // separate value-typed captures whose post-send use by observe()
+        // would violate the sending rule.
+        final class Priming: @unchecked Sendable {
+            let semaphore = DispatchSemaphore(value: 0)
+            var error: Error?
+        }
+        let priming = Priming()
+
+        // The Windows HANDLE typealias is `UnsafeMutableRawPointer?`,
+        // which is *not* Sendable in Swift 6. Wrap it in a Sendable
+        // box so we can capture it into the @Sendable dispatch closure
+        // without unsafe casting tricks. The box holds the raw handle
+        // value; it's our responsibility (the watcher's lifecycle) to
+        // ensure the handle stays valid until the worker exits.
+        final class HandleBox: @unchecked Sendable {
+            let handle: HANDLE
+            init(_ h: HANDLE) { handle = h }
+        }
+        let handleBox = HandleBox(handle)
         let watchDirectory = directory
         let watchDelegate = delegate
 
-        monitorTask = Task.detached { [watchHandle, watchDirectory, watchDelegate] in
-            var buffer = [UInt8](repeating: 0, count: 65536)
-            var bytesReturned: DWORD = 0
-
-            // Create event for overlapped I/O
-            let event = CreateEventW(nil, true, false, nil)
-            guard event != nil else { return }
+        // Use DispatchQueue.global rather than Task.detached: dispatch
+        // closures are @Sendable @convention(block), not `sending`, so
+        // observe() can keep using `priming` after the call without
+        // tripping Swift 6's transfer-of-ownership checker. (And there's
+        // no need for structured concurrency here — the worker is a
+        // single read loop with explicit stop signalling.)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, handleBox, watchDirectory, watchDelegate, priming] in
+            let watchHandle = handleBox.handle
+            // Manual-reset event so the wait is edge-safe across iterations
+            // even if the kernel signals between Wait calls.
+            guard let event = CreateEventW(nil, true, false, nil) else {
+                priming.error = FileMonitorErrors.can_not_open(url: watchDirectory)
+                priming.semaphore.signal()
+                return
+            }
             defer { CloseHandle(event) }
 
             var overlapped = OVERLAPPED()
             overlapped.hEvent = event
+            var buffer = [UInt8](repeating: 0, count: 65536)
 
-            while !Task.isCancelled {
-                // Reset event
-                ResetEvent(event)
-
-                // Start async read
-                let readStarted = buffer.withUnsafeMutableBytes { bufferPtr in
-                    ReadDirectoryChangesW(
-                        watchHandle,
-                        bufferPtr.baseAddress,
-                        DWORD(bufferPtr.count),
-                        false,  // Don't watch subtree
-                        DWORD(FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE),
-                        &bytesReturned,
-                        &overlapped,
-                        nil
-                    )
+            // Issue the first read synchronously. Once this returns
+            // (either with the operation pending or completed), the
+            // kernel is watching for changes — at that point it's safe
+            // to wake up observe(). The loop below picks up from the wait.
+            ResetEvent(event)
+            var bytesReturned: DWORD = 0
+            let initialRead = buffer.withUnsafeMutableBytes { bufferPtr in
+                ReadDirectoryChangesW(
+                    watchHandle,
+                    bufferPtr.baseAddress,
+                    DWORD(bufferPtr.count),
+                    false,  // don't watch subtree
+                    DWORD(FILE_NOTIFY_CHANGE_FILE_NAME |
+                          FILE_NOTIFY_CHANGE_LAST_WRITE |
+                          FILE_NOTIFY_CHANGE_SIZE),
+                    &bytesReturned,
+                    &overlapped,
+                    nil
+                )
+            }
+            if !initialRead {
+                let lastError = GetLastError()
+                if lastError != DWORD(ERROR_IO_PENDING) {
+                    priming.error = FileMonitorErrors.can_not_open(url: watchDirectory)
+                    priming.semaphore.signal()
+                    return
                 }
+                // ERROR_IO_PENDING: read queued, event will be signalled.
+            }
+            // Kernel is now watching. Release observe().
+            priming.semaphore.signal()
 
-                guard readStarted else {
-                    // Check if it's a pending operation (expected for overlapped I/O)
-                    let error = GetLastError()
-                    if error != DWORD(ERROR_IO_PENDING) {
+            // Now consume events. The first iteration waits on the read
+            // we just queued; subsequent iterations re-arm and wait.
+            var needsRearm = false
+            while !(self?.shouldStopWatching ?? true) {
+                if needsRearm {
+                    ResetEvent(event)
+                    let rearmed = buffer.withUnsafeMutableBytes { bufferPtr in
+                        ReadDirectoryChangesW(
+                            watchHandle,
+                            bufferPtr.baseAddress,
+                            DWORD(bufferPtr.count),
+                            false,
+                            DWORD(FILE_NOTIFY_CHANGE_FILE_NAME |
+                                  FILE_NOTIFY_CHANGE_LAST_WRITE |
+                                  FILE_NOTIFY_CHANGE_SIZE),
+                            &bytesReturned,
+                            &overlapped,
+                            nil
+                        )
+                    }
+                    if !rearmed && GetLastError() != DWORD(ERROR_IO_PENDING) {
                         break
                     }
-                    continue
                 }
 
-                // Wait with timeout (1 second) so we can check for cancellation
-                let waitResult = WaitForSingleObject(event, 1000)
-
-                if waitResult == WAIT_OBJECT_0 {
-                    // Get the result
-                    var transferred: DWORD = 0
-                    if GetOverlappedResult(watchHandle, &overlapped, &transferred, false), transferred > 0 {
-                        bytesReturned = transferred
-
-                        // Parse FILE_NOTIFY_INFORMATION structures
-                        buffer.withUnsafeBytes { ptr in
-                            var offset = 0
-                            while offset < Int(bytesReturned) {
-                                guard let baseAddress = ptr.baseAddress else { break }
-
-                                let infoPtr = baseAddress.advanced(by: offset)
-                                let nextEntryOffset = infoPtr.load(as: DWORD.self)
-                                let action = infoPtr.advanced(by: 4).load(as: DWORD.self)
-                                let fileNameLength = infoPtr.advanced(by: 8).load(as: DWORD.self)
-
-                                // File name starts at offset 12 (after NextEntryOffset, Action, FileNameLength)
-                                let fileNamePtr = infoPtr.advanced(by: 12).assumingMemoryBound(to: WCHAR.self)
-                                let charCount = Int(fileNameLength) / MemoryLayout<WCHAR>.size
-
-                                // Convert UTF-16 to String
-                                let fileName = String(utf16CodeUnits: fileNamePtr, count: charCount)
-                                let fileURL = watchDirectory.appendingPathComponent(fileName)
-
-                                // Map Windows action to FileChangeEvent
-                                let event: FileChangeEvent?
-                                switch action {
-                                case DWORD(FILE_ACTION_ADDED), DWORD(FILE_ACTION_RENAMED_NEW_NAME):
-                                    event = .added(file: fileURL)
-                                case DWORD(FILE_ACTION_REMOVED), DWORD(FILE_ACTION_RENAMED_OLD_NAME):
-                                    event = .deleted(file: fileURL)
-                                case DWORD(FILE_ACTION_MODIFIED):
-                                    event = .changed(file: fileURL)
-                                default:
-                                    event = nil
-                                }
-
-                                if let event = event {
-                                    watchDelegate?.fileDidChanged(event: event)
-                                }
-
-                                // Move to next entry or break if this is the last one
-                                if nextEntryOffset == 0 {
-                                    break
-                                }
-                                offset += Int(nextEntryOffset)
-                            }
-                        }
+                // Poll the event with a short timeout so the loop also
+                // notices the stop flag in a bounded time.
+                var completed = false
+                while !(self?.shouldStopWatching ?? true) {
+                    let waitResult = WaitForSingleObject(event, 250)
+                    if waitResult == WAIT_OBJECT_0 {
+                        completed = true
+                        break
+                    } else if waitResult == DWORD(WAIT_TIMEOUT) {
+                        continue
+                    } else {
+                        break
                     }
-                } else if waitResult == DWORD(WAIT_TIMEOUT) {
-                    // Timeout - cancel pending I/O and loop to check Task.isCancelled
+                }
+
+                if self?.shouldStopWatching ?? true {
                     CancelIo(watchHandle)
-                    continue
-                } else {
-                    // Error
+                    var transferred: DWORD = 0
+                    _ = GetOverlappedResult(watchHandle, &overlapped, &transferred, true)
                     break
                 }
+
+                guard completed else { break }
+
+                var transferred: DWORD = 0
+                guard GetOverlappedResult(watchHandle, &overlapped, &transferred, false),
+                      transferred > 0 else {
+                    needsRearm = true
+                    continue
+                }
+
+                buffer.withUnsafeBytes { ptr in
+                    var offset = 0
+                    while offset < Int(transferred) {
+                        guard let baseAddress = ptr.baseAddress else { break }
+
+                        let infoPtr = baseAddress.advanced(by: offset)
+                        let nextEntryOffset = infoPtr.load(as: DWORD.self)
+                        let action = infoPtr.advanced(by: 4).load(as: DWORD.self)
+                        let fileNameLength = infoPtr.advanced(by: 8).load(as: DWORD.self)
+
+                        let fileNamePtr = infoPtr.advanced(by: 12).assumingMemoryBound(to: WCHAR.self)
+                        let charCount = Int(fileNameLength) / MemoryLayout<WCHAR>.size
+                        let fileName = String(utf16CodeUnits: fileNamePtr, count: charCount)
+                        let fileURL = watchDirectory.appendingPathComponent(fileName)
+
+                        let event: FileChangeEvent?
+                        switch action {
+                        case DWORD(FILE_ACTION_ADDED), DWORD(FILE_ACTION_RENAMED_NEW_NAME):
+                            event = .added(file: fileURL)
+                        case DWORD(FILE_ACTION_REMOVED), DWORD(FILE_ACTION_RENAMED_OLD_NAME):
+                            event = .deleted(file: fileURL)
+                        case DWORD(FILE_ACTION_MODIFIED):
+                            event = .changed(file: fileURL)
+                        default:
+                            event = nil
+                        }
+
+                        if let event = event {
+                            watchDelegate?.fileDidChanged(event: event)
+                        }
+
+                        if nextEntryOffset == 0 {
+                            break
+                        }
+                        offset += Int(nextEntryOffset)
+                    }
+                }
+                needsRearm = true
             }
 
-            // Cancel any pending I/O before exiting
             CancelIo(watchHandle)
+        }
+
+        priming.semaphore.wait()
+        if let error = priming.error {
+            // Tear down the handle we successfully opened, since the
+            // worker that owns the rest of the lifecycle exited early.
+            CloseHandle(handle)
+            directoryHandle = nil
+            shouldStopWatching = true
+            throw error
         }
     }
 
     public func stop() {
-        isRunning = false
-        monitorTask?.cancel()
-        monitorTask = nil
+        shouldStopWatching = true
 
         if let handle = directoryHandle {
             CloseHandle(handle)
