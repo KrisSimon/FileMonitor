@@ -16,8 +16,13 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
 
     private let directory: URL
     private var directoryHandle: HANDLE?
-    private var isRunning = false
-    private var monitorTask: Task<Void, Never>?
+    private let stateLock = NSLock()
+    private var _shouldStopWatching: Bool = false
+
+    private var shouldStopWatching: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _shouldStopWatching }
+        set { stateLock.lock(); _shouldStopWatching = newValue; stateLock.unlock() }
+    }
 
     public required init(directory: URL) throws {
         guard directory.isDirectory else {
@@ -46,7 +51,7 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
         }
 
         directoryHandle = handle
-        isRunning = true
+        shouldStopWatching = false
 
         let watchHandle = handle
         let watchDirectory = directory
@@ -54,27 +59,35 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
 
         // Block observe() until the worker has actually queued
         // ReadDirectoryChangesW with the kernel. Without this, observe()
-        // returns the moment Task.detached is scheduled — the kernel may
+        // returns the moment the dispatch is scheduled — the kernel may
         // not yet be watching when the caller performs the operations
         // they want to be notified about. Linux's inotify_add_watch and
         // macOS's FSEventStreamStart both block until the watch is live;
         // this gives Windows the same contract.
-        let primed = DispatchSemaphore(value: 0)
-        // Box for the error so the task can hand one back through the
-        // semaphore handoff. @unchecked Sendable because we only touch
-        // it from the task (before signal) and from observe() (after
-        // wait) — the semaphore is the synchronisation point.
-        final class PrimingError: @unchecked Sendable {
+        //
+        // The priming state is wrapped in a single Sendable class so the
+        // closure captures a reference (uniformly safe across the
+        // Swift-6 strict-concurrency sending constraint) instead of two
+        // separate value-typed captures whose post-send use by observe()
+        // would violate the sending rule.
+        final class Priming: @unchecked Sendable {
+            let semaphore = DispatchSemaphore(value: 0)
             var error: Error?
         }
-        let primingError = PrimingError()
+        let priming = Priming()
 
-        monitorTask = Task.detached { [watchHandle, watchDirectory, watchDelegate, primed, primingError] in
+        // Use DispatchQueue.global rather than Task.detached: dispatch
+        // closures are @Sendable @convention(block), not `sending`, so
+        // observe() can keep using `priming` after the call without
+        // tripping Swift 6's transfer-of-ownership checker. (And there's
+        // no need for structured concurrency here — the worker is a
+        // single read loop with explicit stop signalling.)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, watchHandle, watchDirectory, watchDelegate, priming] in
             // Manual-reset event so the wait is edge-safe across iterations
             // even if the kernel signals between Wait calls.
             guard let event = CreateEventW(nil, true, false, nil) else {
-                primingError.error = FileMonitorErrors.can_not_open(url: watchDirectory)
-                primed.signal()
+                priming.error = FileMonitorErrors.can_not_open(url: watchDirectory)
+                priming.semaphore.signal()
                 return
             }
             defer { CloseHandle(event) }
@@ -83,10 +96,10 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             overlapped.hEvent = event
             var buffer = [UInt8](repeating: 0, count: 65536)
 
-            // Issue the first read synchronously. Once this returns (either
-            // with the operation pending or completed), the kernel is
-            // watching for changes — at that point it's safe to wake up
-            // observe(). The loop below picks up from the wait.
+            // Issue the first read synchronously. Once this returns
+            // (either with the operation pending or completed), the
+            // kernel is watching for changes — at that point it's safe
+            // to wake up observe(). The loop below picks up from the wait.
             ResetEvent(event)
             var bytesReturned: DWORD = 0
             let initialRead = buffer.withUnsafeMutableBytes { bufferPtr in
@@ -106,19 +119,19 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             if !initialRead {
                 let lastError = GetLastError()
                 if lastError != DWORD(ERROR_IO_PENDING) {
-                    primingError.error = FileMonitorErrors.can_not_open(url: watchDirectory)
-                    primed.signal()
+                    priming.error = FileMonitorErrors.can_not_open(url: watchDirectory)
+                    priming.semaphore.signal()
                     return
                 }
                 // ERROR_IO_PENDING: read queued, event will be signalled.
             }
             // Kernel is now watching. Release observe().
-            primed.signal()
+            priming.semaphore.signal()
 
             // Now consume events. The first iteration waits on the read
             // we just queued; subsequent iterations re-arm and wait.
             var needsRearm = false
-            while !Task.isCancelled {
+            while !(self?.shouldStopWatching ?? true) {
                 if needsRearm {
                     ResetEvent(event)
                     let rearmed = buffer.withUnsafeMutableBytes { bufferPtr in
@@ -141,9 +154,9 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
                 }
 
                 // Poll the event with a short timeout so the loop also
-                // notices Task cancellation in a bounded time.
+                // notices the stop flag in a bounded time.
                 var completed = false
-                while !Task.isCancelled {
+                while !(self?.shouldStopWatching ?? true) {
                     let waitResult = WaitForSingleObject(event, 250)
                     if waitResult == WAIT_OBJECT_0 {
                         completed = true
@@ -155,7 +168,7 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
                     }
                 }
 
-                if Task.isCancelled {
+                if self?.shouldStopWatching ?? true {
                     CancelIo(watchHandle)
                     var transferred: DWORD = 0
                     _ = GetOverlappedResult(watchHandle, &overlapped, &transferred, true)
@@ -214,23 +227,19 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
             CancelIo(watchHandle)
         }
 
-        primed.wait()
-        if let error = primingError.error {
+        priming.semaphore.wait()
+        if let error = priming.error {
             // Tear down the handle we successfully opened, since the
-            // task that owns the rest of the lifecycle exited early.
-            monitorTask?.cancel()
-            monitorTask = nil
+            // worker that owns the rest of the lifecycle exited early.
             CloseHandle(handle)
             directoryHandle = nil
-            isRunning = false
+            shouldStopWatching = true
             throw error
         }
     }
 
     public func stop() {
-        isRunning = false
-        monitorTask?.cancel()
-        monitorTask = nil
+        shouldStopWatching = true
 
         if let handle = directoryHandle {
             CloseHandle(handle)
