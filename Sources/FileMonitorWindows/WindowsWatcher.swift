@@ -69,7 +69,7 @@ public final class WindowsWatcher: WatcherProtocol, @unchecked Sendable {
         }
         let primingError = PrimingError()
 
-        monitorTask = Task.detached { [watchHandle, watchDirectory, watchDelegate] in
+        monitorTask = Task.detached { [watchHandle, watchDirectory, watchDelegate, primed, primingError] in
             // Manual-reset event so the wait is edge-safe across iterations
             // even if the kernel signals between Wait calls.
             guard let event = CreateEventW(nil, true, false, nil) else {
